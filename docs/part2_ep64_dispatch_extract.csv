@@ -1,0 +1,14 @@
+case,group,tokens,hidden,topk,experts,status,backend,dtype,n_ranks,dispatch_mean_us(slowest_rank_mean),dispatch_min_us,dispatch_median_us,slowest_rank,slowest_rank_p95_us,slowest_rank_p99_us,slowest_rank_max_us
+perf001_ds_t1_h7168_k6_e384,ds,1,7168,6,384,completed,ll,fp8,64,19.959,19.413,19.766,4,21.614,24.125,24.979
+perf002_ds_t2_h7168_k6_e384,ds,2,7168,6,384,completed,ll,fp8,64,19.978,19.422,19.750,12,21.097,21.167,21.175
+perf003_ds_t4_h7168_k6_e384,ds,4,7168,6,384,completed,ll,fp8,64,20.511,19.954,20.308,28,21.614,25.253,26.605
+perf004_ds_t8_h7168_k6_e384,ds,8,7168,6,384,NO_SUMMARY,,,0,,,,,,,
+perf005_ds_t16_h7168_k6_e384,ds,16,7168,6,384,completed,ll,fp8,64,21.108,20.521,20.896,54,22.683,23.132,23.222
+perf006_ds_t32_h7168_k6_e384,ds,32,7168,6,384,completed,ll,fp8,64,23.435,22.929,23.168,22,24.687,28.353,29.791
+perf007_ds_t48_h7168_k6_e384,ds,48,7168,6,384,completed,ll,fp8,64,31.252,30.700,30.956,23,33.379,34.680,35.212
+perf008_ds_t64_h7168_k6_e384,ds,64,7168,6,384,completed,ll,fp8,64,33.569,32.886,33.269,29,36.057,36.709,36.869
+perf009_ds_t96_h7168_k6_e384,ds,96,7168,6,384,completed,ll,fp8,64,40.252,39.699,39.996,6,42.539,43.463,43.640
+perf010_ds_t128_h7168_k6_e384,ds,128,7168,6,384,completed,ll,fp8,64,48.213,47.580,47.907,28,49.457,50.045,50.224
+perf011_ds_t192_h7168_k6_e384,ds,192,7168,6,384,completed,ll,fp8,64,64.606,63.809,64.321,14,66.353,66.682,66.796
+perf012_ds_t256_h7168_k6_e384,ds,256,7168,6,384,completed,ll,fp8,64,82.419,81.830,82.149,20,86.463,87.379,87.593
+perf013_k3_t1_h3584_k16_e896,k3,1,3584,16,896,NO_SUMMARY,,,0,,,,,,,
