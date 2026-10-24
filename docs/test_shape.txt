@@ -1,0 +1,194 @@
+================================================================================
+DeepEP ElasticBuffer 文档归档
+================================================================================
+
+
+================================================================================
+第一部分：Python 接口与支持范围
+================================================================================
+
+接口对象为 deep_ep.ElasticBuffer。P 为 EP rank 数，T 为每 rank 输入 token 数，
+H 为 hidden，K 为 top-k，E 为全局专家数，R 为本 rank 展开后的接收行数，
+M 为 token 容量上限。
+
+--------------------------------------------------------------------------------
+1. Python 接口
+--------------------------------------------------------------------------------
+
+【ElasticBuffer(...)】
+  输入：group 或 rank/world_size；num_bytes；可选 M/H/K 配置
+  输出与含义：Buffer 对象；num_bytes 为每 rank 的 SHMEM 总容量。
+              可省略 num_bytes，由非零 M/H/K 自动计算。explicitly_destroy=True。
+
+【ElasticBuffer.get_buffer_size_hint(...)】
+  输入：group 或 group=None + world_size；M、H、K、use_fp8_dispatch
+  输出与含义：建议 SHMEM 字节数。包含 dispatch/combine 空间；不进行分配。
+              FP8 设置 use_fp8_dispatch=True；极端热点可能需要更大容量。
+
+【buffer.dispatch(...)】
+  输入：x[T,H]：BF16，或 (FP8 payload[T,H], FP32 scales[T,H/128])；
+        topk_idx：int64[T,K]；可选 topk_weights：FP32[T,K]；num_experts=E
+  输出与含义：(recv_x, None, recv_weights, handle, event)。
+              recv_x 按本地专家展开为 [R,H]；
+              FP8 返回 (payload[R,H], scales[R,H/128])；
+              recv_weights 为 FP32[R] 或 None。
+
+【buffer.dispatch(x, handle=handle, ...)】
+  输入：新 payload、可选新 weights；保持原 T/H/K/E 和路由，省略 topk_idx
+  输出与含义：同上。cached dispatch 复用已生成路由，不重新执行 Notify。
+
+【buffer.combine(x, handle, ...)】
+  输入：BF16 专家结果 x[R,H]；dispatch 返回的 handle；可选 FP32 topk_weights[R]
+  输出与含义：(out, out_weights, event)。
+              out 为 BF16[T,H]，归并各有效专家槽位；
+              out_weights 为 FP32[T,K] 或 None。
+              weights 为独立回传通道，不自动对 x 乘权。
+
+【ElasticBuffer.capture() / event.current_stream_wait()】
+  capture 在当前流记录输入就绪事件；返回 event 可用于消费流等待。
+  capture 返回 EventHandle，可传 previous_event；
+  dispatch/combine 返回 EventOverlap，等待方法建立流依赖。
+
+【buffer.get_comm_stream() / buffer.barrier(...)】
+  通信流查询；barrier(with_cpu_sync=True, sequential=True)
+  分别返回通信流、执行 Host 同步屏障。barrier 当前仅支持上述同步方式。
+
+【buffer.destroy()】
+  所有 rank 按一致顺序调用。
+  释放 Buffer 通信资源。已完成的输出 Tensor 独立持有存储；
+  旧 handle 不再用于通信。
+
+--------------------------------------------------------------------------------
+2. 支持范围
+--------------------------------------------------------------------------------
+
+【规模与形状】
+  EP：2/4/8/16/32/64/128/256/512；
+  1 ≤ T ≤ 16384；
+  0 < H ≤ 7168；
+  1 ≤ K ≤ 16；
+  P ≤ E ≤ 1024，E 须为 P 的整数倍；
+  P × T × K < 2^31。
+
+【数据类型】
+  dispatch：BF16（H 按 16 对齐）或 FP8 E4M3FN + FP32 scales（H 按 128 对齐）；
+  combine：BF16。
+  Tensor 须在对应 NPU、连续且 requires_grad=False。
+
+【输出布局】
+  仅支持 do_expand=None/True、expert_alignment=None/1；
+  不支持 do_expand=False、zero padding、列主序 scales。
+  无效 expert ID 不产生行；重复有效槽位分别保留。
+
+【路由与行数】
+  各 rank 的 T/H/K/E/dtype 及调用顺序一致；R 可不同或为 0。
+  R 读取 handle.num_expanded_tokens；
+  专家行数读取 num_recv_tokens_per_expert_list；
+  num_recv_tokens 为 None。
+
+【核数与 QP 参数】
+  num_compute_units：BF16 dispatch 为 0/32，FP8 dispatch 及 combine 为 0/64；
+  num_qps=0/2；构造 num_allocated_qps=0/6。
+  0 表示默认值。
+
+【容量与形状配置】
+  num_bytes ≥ 2 MiB 且按 2 MiB 对齐。
+  非零构造 hidden/num_topk 固定 H/K，M 限制 token 容量。
+  Dispatch 容量不足时报错；
+  server Combine 可按条件采用窗口复用，仍不足则报错。
+
+【初始化】
+  ProcessGroup 支持 Gloo/HCCL；
+  默认 bootstrap 需 DEEPEP_SHMEM_ENDPOINT。
+  同进程仅一个活跃 Session；默认使用 1 GiB 大页。
+
+【其他选项】
+  支持 fresh/cached dispatch、可选 weights 和同步/异步调用。
+  不支持 bias、统计输出、previous_event_before_epilogue、
+  allocate_on_comm_stream=True、fresh do_cpu_sync=False、deterministic=True。
+
+【辅助查询】
+  get_physical_domain_size、get_logical_domain_size、
+  get_theoretical_num_compute_units、get_theoretical_num_qps 当前未实现。
+
+【补充说明】
+  上述为固定版本的接口范围。
+  小 token 测试需明确选择 HT 路径：例如将有效 M 设为 max(T,257)，
+  避免符合条件的同步调用自动选择 LL。
+  本文性能基线 T ≥ 4096，不涉及该选择边界。
+
+
+================================================================================
+第二部分：性能基线
+================================================================================
+
+配置：random 路由，H=7168，K=6；
+      dispatch 使用 FP8 E4M3FN，combine 使用 BF16；
+      EP8～128 的 E=384，EP256 的 E=512；
+      dispatch 和 combine 均不传 topk_weights。
+
+--------------------------------------------------------------------------------
+1. Profiling 耗时
+--------------------------------------------------------------------------------
+
+【算子 / 路径与统计的 kernel】
+  Dispatch：
+    dispatch_kernel
+    使用已有 handle 测量 cached dispatch kernel；不包含 fresh 调用的 Notify。
+
+  Combine：默认 EP8 rank 路径
+    combine_ep8_mte_kernel
+    仅统计主 combine kernel 耗时。
+
+  Combine：常规路径
+    combine_kernel
+    仅统计主 combine kernel 耗时；combine_prepare_kernel 单独记录，不计入。
+
+  Combine：容量窗口复用
+    combine_reuse_kernel
+    如实际启用，单列结果，不与常规 kernel 混合统计。
+
+【计时与汇总】
+  从 profiler 的 kernel 记录读取 Duration，单位为 μs。
+  复测汇总采用每轮各 rank 耗时的最大值，再对采样轮次求平均，记为 t。
+  使用未插桩 kernel，不计入独立 prepare、barrier、框架拷贝或 Python 耗时；
+  kernel 内部处理计入其 Duration。
+  该时间为算子 kernel 耗时，不代表完整 Python API 耗时。
+
+--------------------------------------------------------------------------------
+2. 带宽计算
+--------------------------------------------------------------------------------
+
+  带宽（GB/s） = T × H × K × dtype_bytes / (t_us × 1000)
+
+  Dispatch FP8：dtype_bytes = 1
+  Combine BF16：dtype_bytes = 2
+
+  按每 rank 逻辑 payload 计算，不再乘 EP；
+  分子不含 FP8 scales、weight 及通信协议字节，
+  也不按 rank/server 去重扣减，
+  因此为算法带宽，不是物理链路流量带宽。
+
+--------------------------------------------------------------------------------
+3. 带宽基线
+--------------------------------------------------------------------------------
+
+  EP    每rank token_num    专家数    Dispatch FP8 (GB/s)    Combine BF16 (GB/s)
+  ------------------------------------------------------------------------------
+  8     4096               384       210–224                211–228
+  8     16384              384       217–231                215–225
+  16    4096               384       253–273                249–268
+  16    16384              384       255–281                253–268
+  32    4096               384       365–378                314–337
+  32    16384              384       337–380                311–336
+  64    4096               384       370–395                337–349
+  64    16384              384       395–408                364–376
+  128   4096               384       305–311                271–288
+  128   16384              384       319–325                301–305
+  256   4096               512       173–177                159–165
+  256   16384              512       184–189                176–179
+
+
+================================================================================
+归档结束
+================================================================================
