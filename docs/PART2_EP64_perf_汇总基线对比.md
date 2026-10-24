@@ -1,8 +1,8 @@
 # PART2 EP64 Dispatch 性能汇总与基线对比
 
-> 数据来源：os1 `/home/deepep/perf-ep64-dispatch/`（15:03~15:51 运行，LL 低时延口径）
+> 数据来源：os1 `/home/y00889330/perf-ep64-dispatch/`（15:03~15:51 运行，LL 低时延口径）
 > 基线来源：`EP性能测试归档.xlsx` → Sheet「DeepEP低时延」
-> 生成时间：2026-10-24 16:55
+> 生成时间：2026-10-24 16:55（最新复核 19:05，无新结果）
 
 ## 一、测试口径
 
@@ -47,7 +47,7 @@
 |---|---|---|---|
 | 1 | **FAIL** | 22.31 | `corrupted double-linked list`（内存损坏）+ 退出码 137 |
 
-**结论**：K3 组 12 档全部未跑出（perf013 首档即崩溃）。原因：`corrupted double-linked list` 内存错误 + timeout 后 SIGKILL。**整个 K3 组需要重跑**。
+**结论**：K3 组 12 档全部未跑出（perf013 首档即崩溃）。原因：`corrupted double-linked list` 内存错误 + timeout 后 SIGKILL。**整个 K3 组需要重跑**（补跑脚本已就绪，`rerun/rerun_p2_ep64_disp*.sh`）。
 
 ## 四、汇总统计
 
@@ -59,9 +59,12 @@
 | 未执行 | 11（k3 组 t2~t256） |
 | ds 组与基线吻合度 | 10/11 档偏差 ≤2.4% |
 
+> **19:05 复核**：EP64 无新结果（perf004 ds_t8 与 k3 组缺口仍在，待补跑）
+
 ## 五、待办
 
 1. **补跑 ds_t8**：SHMEM 偶发失败（status=-4），单档重跑即可
 2. **重跑 K3 组**：首档即 `corrupted double-linked list`，需排查内存问题（可能 psm 残留 / 工作区 8GiB × 64 rank 内存压力）
 3. **确认 BS48/64 偏差**：如重跑仍 +8~10%，需检查该档是否有系统资源竞争
 4. combine 性能（`run_perf_combine_ep64.sh`，LL 同口径）尚未运行，后续调度器会执行
+5. EP32 结果见 `PART2_EP32_perf_汇总基线对比.md`（24 档已全齐）
