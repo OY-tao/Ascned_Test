@@ -183,3 +183,12 @@
   - 复测 vs 补跑值偏差 <0.7%：t48=47.91(-0.7%)、t64=56.72(+0.3%)、t96=73.22(-0.4%)、t128=93.59(+0.3%)、t192=131.56(-0.4%)
   - 结论：**劣化稳定真实**（vs 基线 fp8 10.19 高 +4.9%~+18.9%，基线为早期版本参考有限）
 - **PART4 combine 结论修正**：补跑后全线达标（EP64 σ0.2/1.0=393.8/396.7GB/s=归档 386 的 102~103%），原"66-74% 短板"结论过时
+
+### 4.4 更新记录（2026-10-26 10:30，PART1 EP64 诊断结论修正）
+
+- **PART1 EP64 三档（dispatch_t16384 / combine_t4096/t16384）10-26 凌晨修复版重试仍全失败**（00:28 启动，8 台全下发，01:09 结束）
+  - 修复项均已生效：os6 改经 **os1 跳板**成功参与（`relay_p1_ep64.log`：`os6 started (via os1)`）；master_wait **等满 7/7**（stdout：`ready=7/7, 放行`）；每档独立 waiting/go 标记防串扰
+  - **os6 真实参与铁证**：其本地三档日志齐全（`/home/y00889330/perf-part1-ep64-rerun/*.os6.log`，10-26 01:02~01:15），aclshmem 日志 8 rank 全在，报错与 os1 一致（`WaitFinished timeout after 300000ms` → `status=-3`）
+  - **结论修正**：根因 = **HT 版（test_dispatch.py/test_combine.py）8 机 64 rank SHMEM 组网 AllGather 必卡死**（与节点缺席/同步逻辑无关）；对照 LL 版（test_ep_low_latency.py + `--group-backend hccl`）同 8 机 64 rank 稳定成功（k3retest 5 档全 PASS）
+  - 详细证据链见 `PART1_EP64_SHMEM诊断报告.md`（v2，含全量日志路径速查表）
+- **修复方向（按优先级）**：① 给 HT 版补 `--group-backend hccl` 透传（对齐 LL 版成功路径）→ ② 4 机 32 rank 小规模对照验证 → ③ 兜底用 LL 版按 test_shape 口径补数据
