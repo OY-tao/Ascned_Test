@@ -1,6 +1,6 @@
 # PART1 EP64 SHMEM status=-3 诊断报告
 
-> 版本：v2（2026-10-26 10:30，在 v1 基础上补充 10-26 凌晨修复版重试证据链，**结论已修正**）
+> 版本：v3（2026-10-26 10:40，v2 基础上补充 300s 超时来源分析——新增 2.6/2.7 节，结论不变）
 > 对象：PART1 EP64 缺失 3 档（dispatch_t16384 / combine_t4096 / combine_t16384）多轮重试全部失败，报错 `aclshmemx_init_attr_with_buffers failed (status=-3)`
 > 结论（v2 修正）：**根因 = HT 版（test_dispatch.py / test_combine.py）在 8 机 64 rank 规模下 SHMEM 组网 AllGather 必然卡死（300s 超时 → status=-3），与节点是否缺席无关**。10-26 凌晨修复版已排除"os6 缺席 / 同步等台数不足"两个旧嫌疑，8 台全部真实参与仍全灭；对照 LL 版（test_ep_low_latency.py + `--group-backend hccl`）同规模 8 机稳定成功。
 
@@ -107,6 +107,44 @@ os2 started
 
 每档都是**8 台 64 rank 全部拉起、group allgather 等不到全部对端、卡满 300s 超时 → status=-3**。
 
+### 2.6 300s 超时来源分析（是否可调大？）
+
+**结论：300s 超时来自 deep_ep Python 层 `ElasticBuffer` 的 `num_cpu_timeout_secs=300` 默认值，理论可调大，但调大大概率无效（不是慢，是死等）。**
+
+证据链（源码追踪）：
+
+```
+test_dispatch.py:1644  ElasticBuffer(rank, world_size, num_bytes, num_max_tokens_per_rank, hidden, num_topk, explicitly_destroy=True)
+  → 未传 num_cpu_timeout_secs → 用默认值 300
+deep_ep/buffers/elastic.py:182  num_cpu_timeout_secs: int = 300     ← 300s 源头
+deep_ep/buffers/elastic.py:239  self._runtime = Runtime(group, num_bytes, num_cpu_timeout_secs, ...)
+deep_ep/_runtime.py:75         timeout=120  ← Runtime 默认 120，但被 num_cpu_timeout_secs=300 覆盖
+deep_ep/_runtime.py:233        native.Runtime(rank, size, capacity, address, timeout=300, ...)
+  → aclshmem 内部 ClientWaitContext(300000ms) → WaitFinished timeout after 300000ms
+```
+
+- aclshmem 库自身默认值 `DEFAULT_TIMEOUT = 120`（`third-party/shmem/include/host/shmem_host_def.h:32`）、`SMEM_DEFAUT_WAIT_TIME = 120`（`store_utils.h:48`），**但被 Python 层传入的 300 覆盖**
+- `ElasticBuffer` 校验（elastic.py:217）只限制 `num_device_timeout_secs != 100` 才报错，**`num_cpu_timeout_secs` 不校验，可传任意值**
+
+**为何调大无效（核心判据）**：
+1. **buffer.init 耗时对比**——成功案例 dispatch_t4096（10-24 20:12）`buffer.init` 仅 **89 秒**（20:10:54 → 20:12:23）；失败案例等 300s 连一半 rank 的 `buffer.init.done` 都等不到。64 rank allgather 正常时 89s 完成，说明 300s 余量非常充足，**不是"刚好差一点"**
+2. **combine_t4096 仅 2.08 GiB 也失败**（与成功案例 t4096 2.45 GiB 同量级）——排除"大 buffer 初始化慢"论，纯组网问题
+3. **对照 LL 版 hccl 组网秒级成功**——SHMEM 组网在此规模存在结构性缺陷，非速度问题
+
+**若仍想验证"调大超时"**（排除万一），改动点：`test_dispatch.py:1644` 的 `ElasticBuffer(...)` 调用加 `num_cpu_timeout_secs=900`，`test_combine.py` 同理；预计 10 分钟内可验证一档（等 900s 超时）。
+
+### 2.7 重要环境线索（新增，可能与 300s 无关但值得追）
+
+失败日志中每 rank 首次加载均出现：
+
+```
+deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK used to build this wheel
+```
+
+- 该 warning **成功案例（dispatch_t4096）同样存在**（18/21/24/27/30 行），说明 SHMEM 库版本不一致是**常驻状态**，非失败充分条件
+- `_native.py` 校验：运行时加载的 `/home/y00889330/deepep/third-party/shmem/install/shmem/lib/libshmem.so`（经 LD_LIBRARY_PATH 注入）SHA256 ≠ wheel `_build_info.json` 记录值
+- **值得追查**：10-25 之后是否有人更新过该 libshmem.so 或 SDK，导致 64 rank 组网行为变化（10-24 能成功 ↔ 10-25 后必失败的分水岭）
+
 ---
 
 ## 三、根因结论（v2 修正）
@@ -140,11 +178,13 @@ os2 started
 1. **【首选】HT 版也改走 hccl 组网**：给 `test_dispatch.py` / `test_combine.py` 增加 `--group-backend hccl` 透传（或改默认值），对齐 LL 版 k3retest 已验证的成功路径；这是最可能根治的方案
 2. **【验证】单档小规模对照**：先用 4 机 32 rank（EP32 已在 PART2 验证稳定）跑 HT 版，若 32 rank 成功、64 rank 失败，进一步坐实"64 rank SHMEM 组网上限"
 3. **【兜底】改用 LL 版补 PART1 口径**：若 HT 版无法修复，可评估以 LL 版（已稳定）按 test_shape 口径补 3 档数据（需确认口径可对齐）
-4. **【排查】SHMEM 服务端/驱动状态**：对照 10-24 成功 vs 10-25+ 失败的 aclshmem 日志首部差异（`aclshmem_4019256_20261025184226.log` 等），确认是否环境侧变化（如 shmem 服务端口残留、fabric 状态）
+4. **【排查】SHMEM 库版本不一致**（2.7 节）：比对运行时 `libshmem.so` 与 wheel `_build_info.json` 期望 SHA256，确认 10-25 前后是否有 SDK/库更新导致 64 rank 组网行为变化；若确认库被换，重装匹配版本可能直接解决
+5. **【可选验证】调大 300s 超时**：`test_dispatch.py`/`test_combine.py` 的 `ElasticBuffer()` 调用加 `num_cpu_timeout_secs=900`（见 2.6 节）。预期**大概率无效**（成功案例 89s 完成初始化、2GB buffer 也失败、hccl 对照组秒级成功），但可低成本排除"恰好差一点"的可能
 
 ## 六、当前状态
 
 - 8 台全空、无残留进程；`/home/y00889330/perf-part1-ep64-rerun/` 下 3 档失败目录保留（可复看日志）
 - dispatch_t4096 成功数据保留（node0 目录 + os1.log 85978B）
 - PART1 EP64 3 档缺口仍在；修复方向见第五节，**改 hccl 后即可重试**
+- 各节点 `.sync/` 残留 waiting/go 标记（下一轮 run_case 会 rm 重建，无碍）
 - 各节点 `.sync/` 残留 waiting/go 标记（下一轮 run_case 会 rm 重建，无碍）
