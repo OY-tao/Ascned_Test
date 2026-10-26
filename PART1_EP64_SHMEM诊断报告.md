@@ -1,6 +1,6 @@
 # PART1 EP64 SHMEM status=-3 诊断报告
 
-> 版本：v4（2026-10-26 11:05，v3 基础上**完成 libshmem.so 全量核对**——新增 2.7 实测表，排除"库版本替换"假设，结论不变）
+> 版本：v4.1（2026-10-26 11:22，补充 2.8 节"实际加载库的来源链路"——wheel 不含库、RPATH=$ORIGIN、LD_LIBRARY_PATH 注入、Oct 22 本地 CMake 构建来源全链路实测）
 > 对象：PART1 EP64 缺失 3 档（dispatch_t16384 / combine_t4096 / combine_t16384）多轮重试全部失败，报错 `aclshmemx_init_attr_with_buffers failed (status=-3)`
 > 结论（v2 修正）：**根因 = HT 版（test_dispatch.py / test_combine.py）在 8 机 64 rank 规模下 SHMEM 组网 AllGather 必然卡死（300s 超时 → status=-3），与节点是否缺席无关**。10-26 凌晨修复版已排除"os6 缺席 / 同步等台数不足"两个旧嫌疑，8 台全部真实参与仍全灭；对照 LL 版（test_ep_low_latency.py + `--group-backend hccl`）同规模 8 机稳定成功。
 
@@ -153,6 +153,18 @@ deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK
 | 10-24 成功 vs 10-26 失败 | **用的同一个 7e36a92d 库**（10-24 成功案例日志同样有该 warning）→ **库从未被替换** |
 
 **结论**：该 warning 自 10-22 编译以来就存在，10-24 成功案例与 10-26 失败案例加载同一库文件，**排除"10-25 前后有人更新库导致行为变化"**。库版本核对不是当前瓶颈。顺带发现：os1 上存在 ≥40 种不同 SHA 的 libshmem.so（各用户/各任务各自编译的版本，如 zzh `338d2524`、b00943526 `77907fc7`、xie `4f861481` 等，互不干扰，各自用自己 LD_LIBRARY_PATH）。
+
+### 2.8 实际加载库的来源链路（已实测，10-26 11:20）
+
+**问：8 台机器实际加载的 `7e36a92d` 库是哪来的？** 完整链路：
+
+1. **wheel 本身不带库**：`ascend_deepep-0.1.0.dev5-cp312`（Oct 23 17:12 正式 wheel 安装，无 direct_url）内部**不含 libshmem.so**——`pip show -f` 文件清单与 `RECORD` 均无 shmem 条目，site-packages/deep_ep/ 下只有 `_C.cpython-312-...so` + `libdeepep_kernels.so`
+2. **动态链接器查找顺序**：`_C.so` 的 RPATH=`$ORIGIN`（`readelf -d` 证实），NEEDED=`libshmem.so` → 链接器**先在 deep_ep 包目录找** → 没有 → **回落 LD_LIBRARY_PATH**
+3. **LD_LIBRARY_PATH 注入点**：`rerun_p1_ep64_os1.sh:8`（及 os2-8、rerun_p2_ep64_*.sh 同款）`export LD_LIBRARY_PATH="/home/y00889330/deepep/third-party/shmem/install/shmem/lib:..."` → **实际加载 install/shmem/lib/libshmem.so（7e36a92d）**
+4. **该库的构建来源**：Oct 22 11:04 在 `/home/y00889330/deepep/third-party/shmem/` 本地 CMake 构建（CMakeCache：`CMAKE_CXX_COMPILER=/home/pkg/b070/cann-9.2.0/bin/bisheng`、RELEASE/-O3），`install_manifest.txt` 记录从 `build/lib/` 安装 4 个库到 `install/shmem/lib/`；`deepep-sdk.json`（同目录）记录 revision `4dd80e21`、CANN 9.2.0、target Ascend950、`source_patches: []`；构建后 2 分钟（11:06）生成 `ascend_deepep.egg-info`——**root 用户执行的 SDK 重建 + 安装**
+5. **8 台一致**：os1-8 的 `install/shmem/lib/libshmem.so` 全部 mtime `Oct 22 11:04`、SHA `7e36a92d` 一致（构建后统一分发/同步）
+
+**一句话**：实际加载的库 = **Oct 22 本地用 CANN 9.2.0 + bisheng 编译器从 shmem 源码（revision 4dd80e21）重新编译并 install 的 SDK**，经各 rerun 脚本 LD_LIBRARY_PATH 注入；wheel 不参与提供该库（wheel 构建时用的 SDK 是另一个编译产物 e6346c28，与本地产物 SHA 不同）。
 
 ---
 
