@@ -1,6 +1,6 @@
 # PART1 EP64 SHMEM status=-3 诊断报告
 
-> 版本：v3（2026-10-26 10:40，v2 基础上补充 300s 超时来源分析——新增 2.6/2.7 节，结论不变）
+> 版本：v4（2026-10-26 11:05，v3 基础上**完成 libshmem.so 全量核对**——新增 2.7 实测表，排除"库版本替换"假设，结论不变）
 > 对象：PART1 EP64 缺失 3 档（dispatch_t16384 / combine_t4096 / combine_t16384）多轮重试全部失败，报错 `aclshmemx_init_attr_with_buffers failed (status=-3)`
 > 结论（v2 修正）：**根因 = HT 版（test_dispatch.py / test_combine.py）在 8 机 64 rank 规模下 SHMEM 组网 AllGather 必然卡死（300s 超时 → status=-3），与节点是否缺席无关**。10-26 凌晨修复版已排除"os6 缺席 / 同步等台数不足"两个旧嫌疑，8 台全部真实参与仍全灭；对照 LL 版（test_ep_low_latency.py + `--group-backend hccl`）同规模 8 机稳定成功。
 
@@ -133,7 +133,7 @@ deep_ep/_runtime.py:233        native.Runtime(rank, size, capacity, address, tim
 
 **若仍想验证"调大超时"**（排除万一），改动点：`test_dispatch.py:1644` 的 `ElasticBuffer(...)` 调用加 `num_cpu_timeout_secs=900`，`test_combine.py` 同理；预计 10 分钟内可验证一档（等 900s 超时）。
 
-### 2.7 重要环境线索（新增，可能与 300s 无关但值得追）
+### 2.7 SHMEM 库版本核对（已实测，10-26 11:00）
 
 失败日志中每 rank 首次加载均出现：
 
@@ -141,9 +141,18 @@ deep_ep/_runtime.py:233        native.Runtime(rank, size, capacity, address, tim
 deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK used to build this wheel
 ```
 
-- 该 warning **成功案例（dispatch_t4096）同样存在**（18/21/24/27/30 行），说明 SHMEM 库版本不一致是**常驻状态**，非失败充分条件
-- `_native.py` 校验：运行时加载的 `/home/y00889330/deepep/third-party/shmem/install/shmem/lib/libshmem.so`（经 LD_LIBRARY_PATH 注入）SHA256 ≠ wheel `_build_info.json` 记录值
-- **值得追查**：10-25 之后是否有人更新过该 libshmem.so 或 SDK，导致 64 rank 组网行为变化（10-24 能成功 ↔ 10-25 后必失败的分水岭）
+**10-26 已对该 warning 做了全量核实**，结论：**库版本差异是长期编译产物漂移，不是 10-25 分水岭原因**：
+
+| 核对项 | 结果 |
+|---|---|
+| 8 台机器实际加载的库 | 完全一致：`libshmem.so` SHA=`7e36a92d...`，3903952 B，mtime **Oct 22 11:04**（install/ 与 build/ 两份一致） |
+| wheel `_build_info.json` 期望 | SHA=`e6346c28...`（shmem revision `4dd80e21`，2026-10-07） |
+| 源码 revision | 本地 shmem checkout = `4dd80e21`（与 wheel 期望**完全一致**）；`include/shmem.h` SHA=`57f8808b...` 也一致 |
+| 差异定位 | 同 revision 源码，**本地 Oct 22 11:04 重编译产物（7e36a92d）≠ wheel 构建时 SDK 产物（e6346c28）**——编译环境/工具链差异所致 |
+| 全盘是否有 e6346c28 | **无**（os1 全盘搜索 0 匹配，唯一候选已排除） |
+| 10-24 成功 vs 10-26 失败 | **用的同一个 7e36a92d 库**（10-24 成功案例日志同样有该 warning）→ **库从未被替换** |
+
+**结论**：该 warning 自 10-22 编译以来就存在，10-24 成功案例与 10-26 失败案例加载同一库文件，**排除"10-25 前后有人更新库导致行为变化"**。库版本核对不是当前瓶颈。顺带发现：os1 上存在 ≥40 种不同 SHA 的 libshmem.so（各用户/各任务各自编译的版本，如 zzh `338d2524`、b00943526 `77907fc7`、xie `4f861481` 等，互不干扰，各自用自己 LD_LIBRARY_PATH）。
 
 ---
 
@@ -178,7 +187,7 @@ deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK
 1. **【首选】HT 版也改走 hccl 组网**：给 `test_dispatch.py` / `test_combine.py` 增加 `--group-backend hccl` 透传（或改默认值），对齐 LL 版 k3retest 已验证的成功路径；这是最可能根治的方案
 2. **【验证】单档小规模对照**：先用 4 机 32 rank（EP32 已在 PART2 验证稳定）跑 HT 版，若 32 rank 成功、64 rank 失败，进一步坐实"64 rank SHMEM 组网上限"
 3. **【兜底】改用 LL 版补 PART1 口径**：若 HT 版无法修复，可评估以 LL 版（已稳定）按 test_shape 口径补 3 档数据（需确认口径可对齐）
-4. **【排查】SHMEM 库版本不一致**（2.7 节）：比对运行时 `libshmem.so` 与 wheel `_build_info.json` 期望 SHA256，确认 10-25 前后是否有 SDK/库更新导致 64 rank 组网行为变化；若确认库被换，重装匹配版本可能直接解决
+4. **【已排除】SHMEM 库版本不一致**（2.7 节已实测）：8 台加载同一 `7e36a92d` 库（Oct 22 编译至今未变），10-24 成功与 10-26 失败用同一库；warning 是常驻编译产物漂移，**与 64 rank 卡死无关**
 5. **【可选验证】调大 300s 超时**：`test_dispatch.py`/`test_combine.py` 的 `ElasticBuffer()` 调用加 `num_cpu_timeout_secs=900`（见 2.6 节）。预期**大概率无效**（成功案例 89s 完成初始化、2GB buffer 也失败、hccl 对照组秒级成功），但可低成本排除"恰好差一点"的可能
 
 ## 六、当前状态
