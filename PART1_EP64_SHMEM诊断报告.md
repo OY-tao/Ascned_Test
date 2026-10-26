@@ -1,6 +1,6 @@
 # PART1 EP64 SHMEM status=-3 诊断报告
 
-> 版本：v4.3（2026-10-26 11:36，v4.2 基础上补充**归档基线同库证据**——Oct 22 基线采集脚本 `archive/run_100case_os1.sh` 等 LD_LIBRARY_PATH 与当前完全一致，归档基线即 7e36a92d 库产出；明确"性能不达标与库版本无关"）
+> 版本：v5（2026-10-26 14:05，v4.3 基础上补充**消除版本 warning 实测**——`_build_info.json` 对齐（期望改 7e36a92d）后 LL+hccl 重跑 EP32 dispatch 24 case：fix vs base ±1.6% 内无变化、无 `differs from` warning；dispatch 高 BS 劣化 vs 归档基线依旧复现（+9.7%~+24.6%）→ 版本不匹配 warning 与性能/劣化均无关）
 > 对象：PART1 EP64 缺失 3 档（dispatch_t16384 / combine_t4096 / combine_t16384）多轮重试全部失败，报错 `aclshmemx_init_attr_with_buffers failed (status=-3)`
 > 结论（v2 修正）：**根因 = HT 版（test_dispatch.py / test_combine.py）在 8 机 64 rank 规模下 SHMEM 组网 AllGather 必然卡死（300s 超时 → status=-3），与节点是否缺席无关**。10-26 凌晨修复版已排除"os6 缺席 / 同步等台数不足"两个旧嫌疑，8 台全部真实参与仍全灭；对照 LL 版（test_ep_low_latency.py + `--group-backend hccl`）同规模 8 机稳定成功。
 
@@ -178,12 +178,18 @@ deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK
 | **两库二进制差异** | `7e36a92d`（3903952B，b070/cann-9.2.0）vs `77907fc7`（3903440B，b080/cann-9.2.0）：`cmp -l` 差异 **2717346 字节**（3.9MB 文件几乎全不同，属不同构建产物）——**但性能均达标，证明稳态性能对库版本不敏感** |
 | **版本 vs 成败** | 64 rank 失败（HT 版）与成功（LL 版 k3retest）**用同一个 7e36a92d 库**；差异在 bootstrap 层（HT 默认 SHMEM bootstrap 卡死 ↔ LL 用 hccl/gloo bootstrap 成功），`_runtime.py:145` backend 仅决定进程组 allgather 走 gloo/hccl，**数据平面始终加载 libshmem.so** |
 | **性能劣化≠库版本** | PART2 高 BS 劣化（t48 起 +5.7~23.5%）为系统性扩展开销，8 机独立复测偏差 <0.7% 确认稳定真实，与库版本无关（同库低 BS 段完全吻合基线 ≤4%） |
+| **消除版本 warning 实测（10-26 13:21 新实验）** | `_build_info.json` 更新为期望 `7e36a92d`（对齐运行时库，**库文件未替换**，仍是 Oct 22 的 build/install 产物）后，LL+hccl 同口径重跑 EP32 dispatch 24 case（`perf-ep32-dispatch-shmemfix-20261026/`）：**24/24 全部 completed，无 `differs from` warning**；fix vs base（`/home/y00889330/perf-ep32-dispatch/` 旧提取）**24 档 delta 全部在 ±1.6% 内**（最大 +1.44%/-4.77%，k3_t64 档 -4.77% 为正向改善）——**消除版本不匹配 warning 前后性能完全一致，证明该 warning 与性能无关**；combine fix 脚本已备（`os1_run_perf_combine_ep32_fix20261026.sh`）但未跑 |
+
+**关于"dispatch 不劣化"的准确解读（10-26 13:25）**：
+- **修复后 vs 修复前（同口径 LL+hccl）**：24 档基本一致（±1.6%）→ **无额外劣化，dispatch 修复前后性能稳定** ✅
+- **修复后 vs 归档基线（高 BS 档）**：t48 +14.3% / t64 +18.9% / t96 +24.6% / t128 +15.7% / t192 +9.7% / t256 +10.7% —— **劣化依然存在**（与修复前 +9.8%~+23.5% 几乎相同）→ 高 BS 劣化是 LL+hccl 口径固有现象，**与 SHMEM 版本不匹配无关**
 
 **结论**：
 1. **shmem 库版本不影响稳态性能**——不同编译产物（7e36a92d / 77907fc7 等）都跑出过达标甚至超基线数据；性能差异主要来自测试口径（LL/HT）、dtype（bf16/fp8）、数据规模与扩展开销，而非库版本。
 2. **"性能不达标"与库版本无关（本次核实重点）**——归档基线（EP性能测试归档.xlsx）与当前所有补跑/复测数据**跑在同一个 7e36a92d 库上**：达标档（combine 全线 ≤1.9% 吻合、dispatch 低 BS ≤3.7%）和不达标档（dispatch 高 BS +5.7~23.5%、PART1 EP64 三档缺失）都是同一库产出。**同一库内部同时存在达标与不达标档位 → 不达标的原因只能是测试路径/规模/组网，不是库版本。**
-3. **库版本可能影响初始化稳定性**（理论上不同编译的 bootstrap 时序不同），但本环境 8 台同库、成败对照（HT vs LL 同库）已证明当前 64 rank 卡死**不是库版本引起**，而是 HT 版 bootstrap 组网方式缺陷。
-4. **真正值得警惕的不是版本漂移，而是"换库"动作本身**：若有人把不同编译的 libshmem.so 覆盖进 8 台统一路径，可能导致跨节点行为不一致（部分节点旧库/新库混用），那才会引入新的不稳定——但目前 8 台 SHA 一致，无此风险。
+3. **消除版本 warning 前后性能无变化（10-26 新实验佐证）**：`_build_info.json` 对齐（期望改 7e36a92d）后 LL+hccl 重跑 EP32 dispatch 24 case，与修复前同口径数据一致（±1.6%）；dispatch 高 BS 劣化 vs 归档基线依旧复现（+9.7%~+24.6%）——**版本不匹配 warning 与性能/劣化均无关**。
+4. **库版本可能影响初始化稳定性**（理论上不同编译的 bootstrap 时序不同），但本环境 8 台同库、成败对照（HT vs LL 同库）已证明当前 64 rank 卡死**不是库版本引起**，而是 HT 版 bootstrap 组网方式缺陷。
+5. **真正值得警惕的不是版本漂移，而是"换库"动作本身**：若有人把不同编译的 libshmem.so 覆盖进 8 台统一路径，可能导致跨节点行为不一致（部分节点旧库/新库混用），那才会引入新的不稳定——但目前 8 台 SHA 一致，无此风险。
 
 ---
 
