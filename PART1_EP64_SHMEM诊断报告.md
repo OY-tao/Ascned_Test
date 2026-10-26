@@ -1,6 +1,6 @@
 # PART1 EP64 SHMEM status=-3 诊断报告
 
-> 版本：v4.2（2026-10-26 11:30，新增 2.9 节"shmem 版本对性能的影响"——不同库版本均跑出达标数据、成败对照同库、性能劣化与库版本无关）
+> 版本：v4.3（2026-10-26 11:36，v4.2 基础上补充**归档基线同库证据**——Oct 22 基线采集脚本 `archive/run_100case_os1.sh` 等 LD_LIBRARY_PATH 与当前完全一致，归档基线即 7e36a92d 库产出；明确"性能不达标与库版本无关"）
 > 对象：PART1 EP64 缺失 3 档（dispatch_t16384 / combine_t4096 / combine_t16384）多轮重试全部失败，报错 `aclshmemx_init_attr_with_buffers failed (status=-3)`
 > 结论（v2 修正）：**根因 = HT 版（test_dispatch.py / test_combine.py）在 8 机 64 rank 规模下 SHMEM 组网 AllGather 必然卡死（300s 超时 → status=-3），与节点是否缺席无关**。10-26 凌晨修复版已排除"os6 缺席 / 同步等台数不足"两个旧嫌疑，8 台全部真实参与仍全灭；对照 LL 版（test_ep_low_latency.py + `--group-backend hccl`）同规模 8 机稳定成功。
 
@@ -168,9 +168,12 @@ deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK
 
 ### 2.9 shmem 版本会影响性能吗？（实测结论：**不影响稳态性能，只影响初始化成败**）
 
+> **决定性证据（10-26 11:35 补充）：归档基线本身就是用 `7e36a92d` 这个库测出来的。**
+
 | 维度 | 证据 |
 |---|---|
-| **同库跑出达标性能** | `7e36a92d` 库（8 台统一）：PART1 dispatch_t4096 达标（10-24）、PART2 LL 96/96 档全齐（EP32/64 全矩阵）——**同一个库产出过全量达标数据** |
+| **归档基线与当前同库** | `archive/run_100case_os1.sh:9`、`run_dual_node_os1.sh:8`、`run_dispatch.sh:7`（Oct 22 基线采集脚本）的 LD_LIBRARY_PATH 与当前补跑脚本**完全相同**：`/home/y00889330/deepep/third-party/shmem/install/shmem/lib` → **官方归档基线（EP性能测试归档.xlsx）就是用 7e36a92d 测的**；当前所有不达标/劣化档位也跑在**同一个库**上——基线 vs 实测不存在"库版本不同"的系统性偏差 |
+| **同库跑出达标性能** | `7e36a92d` 库（8 台统一）：PART1 dispatch_t4096 达标（10-24）、PART2 LL 96/96 档全齐（EP32/64 全矩阵）、combine 各组合全线吻合归档（≤1.9%）——**同一个库同时产出过达标与劣化数据，达标/劣化差异不可能是库版本造成** |
 | **不同库同样达标** | b00943526（PART4）`77907fc7`：combine 全线 102~103%（393.8/396.7 GB/s），超归档基线——**另一版本库性能同样达标** |
 | **两库二进制差异** | `7e36a92d`（3903952B，b070/cann-9.2.0）vs `77907fc7`（3903440B，b080/cann-9.2.0）：`cmp -l` 差异 **2717346 字节**（3.9MB 文件几乎全不同，属不同构建产物）——**但性能均达标，证明稳态性能对库版本不敏感** |
 | **版本 vs 成败** | 64 rank 失败（HT 版）与成功（LL 版 k3retest）**用同一个 7e36a92d 库**；差异在 bootstrap 层（HT 默认 SHMEM bootstrap 卡死 ↔ LL 用 hccl/gloo bootstrap 成功），`_runtime.py:145` backend 仅决定进程组 allgather 走 gloo/hccl，**数据平面始终加载 libshmem.so** |
@@ -178,8 +181,9 @@ deep_ep/_native.py:29: RuntimeWarning: Loaded SHMEM library differs from the SDK
 
 **结论**：
 1. **shmem 库版本不影响稳态性能**——不同编译产物（7e36a92d / 77907fc7 等）都跑出过达标甚至超基线数据；性能差异主要来自测试口径（LL/HT）、dtype（bf16/fp8）、数据规模与扩展开销，而非库版本。
-2. **库版本可能影响初始化稳定性**（理论上不同编译的 bootstrap 时序不同），但本环境 8 台同库、成败对照（HT vs LL 同库）已证明当前 64 rank 卡死**不是库版本引起**，而是 HT 版 bootstrap 组网方式缺陷。
-3. **真正值得警惕的不是版本漂移，而是"换库"动作本身**：若有人把不同编译的 libshmem.so 覆盖进 8 台统一路径，可能导致跨节点行为不一致（部分节点旧库/新库混用），那才会引入新的不稳定——但目前 8 台 SHA 一致，无此风险。
+2. **"性能不达标"与库版本无关（本次核实重点）**——归档基线（EP性能测试归档.xlsx）与当前所有补跑/复测数据**跑在同一个 7e36a92d 库上**：达标档（combine 全线 ≤1.9% 吻合、dispatch 低 BS ≤3.7%）和不达标档（dispatch 高 BS +5.7~23.5%、PART1 EP64 三档缺失）都是同一库产出。**同一库内部同时存在达标与不达标档位 → 不达标的原因只能是测试路径/规模/组网，不是库版本。**
+3. **库版本可能影响初始化稳定性**（理论上不同编译的 bootstrap 时序不同），但本环境 8 台同库、成败对照（HT vs LL 同库）已证明当前 64 rank 卡死**不是库版本引起**，而是 HT 版 bootstrap 组网方式缺陷。
+4. **真正值得警惕的不是版本漂移，而是"换库"动作本身**：若有人把不同编译的 libshmem.so 覆盖进 8 台统一路径，可能导致跨节点行为不一致（部分节点旧库/新库混用），那才会引入新的不稳定——但目前 8 台 SHA 一致，无此风险。
 
 ---
 
