@@ -14,8 +14,8 @@
 | EP16 | os5(master)+os6，2 机 × 8 rank = 16 rank |
 | EP32 | os5(master)+os6+os7+os8，4 机 × 8 rank = 32 rank |
 | 口径 | HT、random 路由、fp8 dispatch、h7168/k6/e384、warmup5/iters10/repeat2 |
-| 输出 | `/home/deepep/perf-part1-ep16-barrier/`、`/home/deepep/perf-part1-ep32-barrier/`（各节点 node0-3） |
-| 对照 | `/home/deepep/perf-part1-ep16/`、`/home/deepep/perf-part1-ep32/`（10-22 基线，os1-4） |
+| 输出 | `/home/y00889330/perf-part1-ep16-barrier/`、`/home/y00889330/perf-part1-ep32-barrier/`（各节点 node0-3） |
+| 对照 | `/home/y00889330/perf-part1-ep16/`、`/home/y00889330/perf-part1-ep32/`（10-22 基线，os1-4） |
 | 正确性 | 4 case 全部 checks=4 passed=True，日志 0 error |
 
 ## 二、全量结果（16/32 rank 全量，文档口径：每轮各 rank max 再对轮次平均）
@@ -60,7 +60,7 @@
 ## 五、产物清单
 
 - 测试文件：`deepep/tests/elastic/test_dispatch_barrier.py`（8 台，SHA `0bc2dc6358aa4beb`）
-- 脚本：`/home/deepep/os{N}_run_perf1_dispatch_ep{16,32,64}_barrier.sh`（N 对应节点）
-- 数据：`/home/deepep/perf-part1-ep16-barrier/`、`/home/deepep/perf-part1-ep32-barrier/`（os5-8 各节点）
+- 脚本：`/home/y00889330/os{N}_run_perf1_dispatch_ep{16,32,64}_barrier.sh`（N 对应节点）
+- 数据：`/home/y00889330/perf-part1-ep16-barrier/`、`/home/y00889330/perf-part1-ep32-barrier/`（os5-8 各节点）
 - 提取 CSV：`/tmp/ep{16,32}_{baseline,barrier}.csv`（初版，仅 os5 node0 8 rank）+ 全量 JSON：`/tmp/dispatch_data/full/`（4 节点全 rank）
 - 分析脚本：`extract_dispatch.py` / `compare_barrier.py` / `/tmp/agg_dispatch.py` / `/tmp/barrier_verdict.py` / `/tmp/rank_breakdown.py`
