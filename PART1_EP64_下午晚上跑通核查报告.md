@@ -35,7 +35,7 @@
 
 - 8 台 `_C.so` 全部一致：SHA `7a1852af...`（os1-4 mtime 10-26 14:34，os5-8 mtime 10-23 17:13，内容相同）
 - SHMEM 库未变：`libshmem.so` SHA `7e36a92d`（Oct 22 构建，与之前相同）
-- lsx 跑通时加载的库（rank-0.exit.json loaded_files 实测）：`/home/deepep/deepep/third-party/shmem/install/shmem/lib/libshmem.so`（7e36a92d）、`_C.so`（7a1852af）——**与我们当前环境完全一致**
+- lsx 跑通时加载的库（rank-0.exit.json loaded_files 实测）：`/home/y00889330/deepep/third-party/shmem/install/shmem/lib/libshmem.so`（7e36a92d）、`_C.so`（7a1852af）——**与我们当前环境完全一致**
 
 ### 3. 对比凌晨失败（为什么之前不行）
 
@@ -58,7 +58,7 @@ lsx 的跑通是 **t4096 精度校验**（--dtype both），不是 t16384 性能
 
 - 23:24-23:37 有任务在跑：**EP64 barrier 复测**（`relaunch_barrier8.sh`，8 台 `os{N}_run_perf1_dispatch_ep64_barrier.sh`，`test_dispatch_barrier.py` 版，t4096 性能档 barrier 实验）
 - 23:41 master_wait ready=7/7 放行，当前正常执行中（说明 8 台 64 rank 已可正常初始化）
-- 输出：`/home/deepep/perf-part1-ep64-barrier/`
+- 输出：`/home/y00889330/perf-part1-ep64-barrier/`
 
 ## 五、建议
 
